@@ -10,7 +10,9 @@ import {
 	isJidNewsletter,
 	isJidStatusBroadcast,
 	isJidUser,
-	isLidUser
+	isLidUser,
+	jidDecode,
+	jidEncode
 } from '../WABinary'
 import { unpadRandomMax16 } from './generics'
 import type { ILogger } from './logger'
@@ -149,6 +151,31 @@ export const decryptMessageNode = (
 	logger: ILogger
 ) => {
 	const { fullMessage, author, sender } = decodeMessageNode(stanza, meId, meLid)
+
+	/**
+	 * SALESQUICKLY_LID_SESSION: 同一对端设备的另一种寻址（LID ↔ PN）对应的 Signal 地址。
+	 * 6.7 无 LID mapping / 会话迁移：入站按 from(@lid) 的会话解密，出站按 PN 建会话，
+	 * 对端（只维护一份会话）收到我方 PN 会话的 pkmsg 后会切到新会话，之后发来的 msg
+	 * 用 @lid 地址就解不开（Bad MAC / No matching sessions）。此时按另一寻址再试一次。
+	 */
+	const altSessionJid = (jid: string): string | undefined => {
+		const decoded = jidDecode(jid)
+		if (!decoded?.user) return undefined
+		const isParticipant = !!stanza.attrs.participant && jid === stanza.attrs.participant
+		const altRaw = isLidUser(jid)
+			? isParticipant
+				? stanza.attrs.participant_pn
+				: stanza.attrs.sender_pn
+			: isJidUser(jid)
+				? isParticipant
+					? stanza.attrs.participant_lid
+					: stanza.attrs.sender_lid
+				: undefined
+		const alt = altRaw ? jidDecode(altRaw) : undefined
+		if (!alt?.user || alt.server === decoded.server) return undefined
+		return jidEncode(alt.user, alt.server, decoded.device)
+	}
+
 	return {
 		fullMessage,
 		category: stanza.attrs.category,
@@ -192,11 +219,38 @@ export const decryptMessageNode = (
 							case 'pkmsg':
 							case 'msg':
 								const user = isJidUser(sender) ? sender : author
-								msgBuffer = await repository.decryptMessage({
-									jid: user,
-									type: e2eType,
-									ciphertext: content
-								})
+								try {
+									msgBuffer = await repository.decryptMessage({
+										jid: user,
+										type: e2eType,
+										ciphertext: content
+									})
+								} catch (primaryErr: any) {
+									// SALESQUICKLY_LID_SESSION: 仅对 msg 兜底（libsignal 解密失败不改写会话，重试安全）；
+									// pkmsg 本身会建新会话，不在此处理
+									const altJid = e2eType === 'msg' ? altSessionJid(user) : undefined
+									//eslint-disable-next-line max-depth
+									if (!altJid) throw primaryErr
+									try {
+										msgBuffer = await repository.decryptMessage({
+											jid: altJid,
+											type: e2eType,
+											ciphertext: content
+										})
+									} catch (altErr: any) {
+										logger.warn(
+											{ key: fullMessage.key, primary: user, alt: altJid, altErr: altErr?.message },
+											'alternate LID/PN session decrypt also failed'
+										)
+										throw primaryErr
+									}
+
+									logger.info(
+										{ key: fullMessage.key, primary: user, alt: altJid, primaryErr: primaryErr?.message },
+										'decrypted with alternate LID/PN session'
+									)
+								}
+
 								break
 							case 'plaintext':
 								msgBuffer = content
