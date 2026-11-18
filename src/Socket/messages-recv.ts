@@ -56,6 +56,7 @@ import {
 	isJidUser,
 	isLidUser,
 	jidDecode,
+	jidEncode,
 	jidNormalizedUser,
 	S_WHATSAPP_NET
 } from '../WABinary'
@@ -638,11 +639,38 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		msgRetryCache.set(key, newValue)
 	}
 
+	/**
+	 * SALESQUICKLY_LID_SESSION: 1:1 retry 的发起设备可能是 @lid（如本号手机 227…:0@lid、对端 550…:0@lid），
+	 * 而原消息按目标的寻址（通常 PN）发出。不换算的话：
+	 *  - assertSessions(force) 在 LID 地址建新会话，relayMessage 却仍用 PN 地址的旧会话加密 → 重发照样解不开；
+	 *  - relayMessage 用 LID user 与 PN 的 meUser 比较，本号设备被当成「别人」，拼出不存在的
+	 *    `<lidUser>@s.whatsapp.net`，且不包 deviceSentMessage / 不带 recipient → 本号手机一直「正在等待此消息」。
+	 * 换算为与目标相同寻址的同一设备号（设备号在 LID/PN 两种寻址下一致）。群 / 状态不处理。
+	 */
+	const normalizeRetryParticipant = (participant: string, remoteJid: string): string => {
+		if (isJidGroup(remoteJid) || isJidStatusBroadcast(remoteJid)) return participant
+		const p = jidDecode(participant)
+		const dest = jidDecode(remoteJid)
+		const isUserServer = (s?: string) => s === 'lid' || s === 's.whatsapp.net'
+		if (!p || !dest || p.server === dest.server || !isUserServer(p.server) || !isUserServer(dest.server)) {
+			return participant
+		}
+
+		const meId = authState.creds.me?.id
+		const meLid = authState.creds.me?.lid
+		const isMe = areJidsSameUser(participant, meId) || areJidsSameUser(participant, meLid)
+		const user = isMe ? jidDecode(dest.server === 'lid' ? meLid : meId)?.user : dest.user
+		if (!user) return participant
+		const normalized = jidEncode(user, dest.server, p.device)
+		logger.info({ participant, normalized, remoteJid, isMe }, 'normalized retry participant addressing')
+		return normalized
+	}
+
 	const sendMessagesAgain = async (key: proto.IMessageKey, ids: string[], retryNode: BinaryNode) => {
 		// todo: implement a cache to store the last 256 sent messages (copy whatsmeow)
 		const msgs = await Promise.all(ids.map(id => getMessage({ ...key, id })))
 		const remoteJid = key.remoteJid!
-		const participant = key.participant || remoteJid
+		const participant = normalizeRetryParticipant(key.participant || remoteJid, remoteJid)
 		// if it's the primary jid sending the request
 		// just re-send the message to everyone
 		// prevents the first message decryption failure
