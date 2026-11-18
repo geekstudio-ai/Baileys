@@ -1,6 +1,6 @@
 import * as nodeCrypto from 'crypto'
 /* @ts-ignore */
-import { generateKeyPair } from 'libsignal/src/curve'
+import { generateKeyPair } from 'libsignal/src/curve.js'
 
 type KeyPairType = ReturnType<typeof generateKeyPair>
 
