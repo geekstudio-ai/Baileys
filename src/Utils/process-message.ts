@@ -18,6 +18,7 @@ import { aesDecryptGCM, hmacSign } from './crypto'
 import { toNumber } from './generics'
 import { downloadAndProcessHistorySyncNotification } from './history'
 import type { ILogger } from './logger'
+import { storeTcTokensFromHistorySync } from './tc-token-utils'
 
 type ProcessMessageContext = {
 	shouldProcessHistoryMsg: boolean
@@ -239,6 +240,16 @@ const processMessage = async (
 					}
 
 					const data = await downloadAndProcessHistorySyncNotification(histNotification, options)
+
+					// SALESQUICKLY_TCTOKEN: history 会话里的 tcToken 是对端 token 主来源
+					try {
+						const stored = await storeTcTokensFromHistorySync(keyStore, data.chats)
+						if (stored > 0) {
+							logger?.info({ stored, chats: data.chats.length }, 'persisted tctoken(s) from history sync')
+						}
+					} catch (err) {
+						logger?.warn({ err }, 'failed to persist tctokens from history sync')
+					}
 
 					ev.emit('messaging-history.set', {
 						...data,

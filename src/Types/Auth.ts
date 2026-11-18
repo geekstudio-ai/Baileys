@@ -72,6 +72,11 @@ export type SignalDataTypeMap = {
 	'sender-key-memory': { [jid: string]: boolean }
 	'app-state-sync-key': proto.Message.IAppStateSyncKeyData
 	'app-state-sync-version': LTHashState
+	/**
+	 * SALESQUICKLY_TCTOKEN: Trusted Contact privacy token per peer JID.
+	 * Missing tokens on 1:1 outbound stanzas trigger WA ack error 463 (reach-out time-lock).
+	 */
+	tctoken: { token: Buffer; timestamp?: string; senderTimestamp?: number }
 }
 
 export type SignalDataSet = { [T in keyof SignalDataTypeMap]?: { [id: string]: SignalDataTypeMap[T] | null } }

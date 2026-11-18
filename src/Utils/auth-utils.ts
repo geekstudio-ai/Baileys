@@ -57,7 +57,8 @@ export function makeCacheableSignalKeyStore(
 					const item = fetched[id]
 					if (item) {
 						data[id] = item
-						cache.set(getUniqueId(type, id), item)
+						// cast: SignalDataTypeMap 联合变宽后 T 与 cache 泛型交不上（加 tctoken 后必现）
+						cache.set(getUniqueId(type, id), item as any)
 					}
 				}
 			}

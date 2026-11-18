@@ -35,6 +35,7 @@ import {
 	MISSING_KEYS_ERROR_TEXT,
 	NACK_REASONS,
 	NO_MESSAGE_FOUND_ERROR_TEXT,
+	storeTcTokenNodes,
 	unixTimestampSeconds,
 	xmppPreKey,
 	xmppSignedPreKey
@@ -393,16 +394,21 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		switch (nodeType) {
 			case 'privacy_token':
 				const tokenList = getBinaryNodeChildren(child, 'token')
+				// SALESQUICKLY_TCTOKEN: from=对端；attrs.jid 常为本端。必须用 from 作 fallback 落库
+				try {
+					const stored = await storeTcTokenNodes(authState.keys, tokenList, from)
+					logger.info({ from, stored }, 'persisted privacy_token tctoken(s)')
+				} catch (err) {
+					logger.warn({ err, from }, 'failed to persist privacy_token')
+				}
 				for (const { attrs, content } of tokenList) {
 					const jid = attrs.jid
 					ev.emit('chats.update', [
 						{
-							id: jid,
+							id: jid || from,
 							tcToken: content as Buffer
 						}
 					])
-
-					logger.debug({ jid }, 'got privacy token update')
 				}
 
 				break

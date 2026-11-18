@@ -1,5 +1,4 @@
-/* @ts-ignore */
-import * as libsignal from 'libsignal'
+import * as libsignalImport from 'libsignal'
 import type { SignalAuthState } from '../Types'
 import type { SignalRepository } from '../Types/Signal'
 import { generateSignalPubKey } from '../Utils'
@@ -9,8 +8,14 @@ import { SenderKeyName } from './Group/sender-key-name'
 import { SenderKeyRecord } from './Group/sender-key-record'
 import { GroupCipher, GroupSessionBuilder, SenderKeyDistributionMessage } from './Group'
 
+// libsignal 类型声明不完整：SenderKeyStore 与 SignalStorage 对不上，运行时同一对象
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const libsignal = libsignalImport as any
+
 export function makeLibSignalRepository(auth: SignalAuthState): SignalRepository {
 	const storage: SenderKeyStore = signalStorage(auth)
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	const signalStore = storage as any
 	return {
 		decryptGroupMessage({ group, authorJid, msg }) {
 			const senderName = jidToSignalSenderKeyName(group, authorJid)
@@ -43,7 +48,7 @@ export function makeLibSignalRepository(auth: SignalAuthState): SignalRepository
 		},
 		async decryptMessage({ jid, type, ciphertext }) {
 			const addr = jidToSignalProtocolAddress(jid)
-			const session = new libsignal.SessionCipher(storage, addr)
+			const session = new libsignal.SessionCipher(signalStore, addr)
 			let result: Buffer
 			switch (type) {
 				case 'pkmsg':
@@ -60,7 +65,7 @@ export function makeLibSignalRepository(auth: SignalAuthState): SignalRepository
 		},
 		async encryptMessage({ jid, data }) {
 			const addr = jidToSignalProtocolAddress(jid)
-			const cipher = new libsignal.SessionCipher(storage, addr)
+			const cipher = new libsignal.SessionCipher(signalStore, addr)
 
 			const { type: sigType, body } = await cipher.encrypt(data)
 			const type = sigType === 3 ? 'pkmsg' : 'msg'
@@ -86,7 +91,7 @@ export function makeLibSignalRepository(auth: SignalAuthState): SignalRepository
 			}
 		},
 		async injectE2ESession({ jid, session }) {
-			const cipher = new libsignal.SessionBuilder(storage, jidToSignalProtocolAddress(jid))
+			const cipher = new libsignal.SessionBuilder(signalStore, jidToSignalProtocolAddress(jid))
 			await cipher.initOutgoing(session)
 		},
 		jidToSignalProtocolAddress(jid) {

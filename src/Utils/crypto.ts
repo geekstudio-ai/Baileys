@@ -1,8 +1,11 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from 'crypto'
-/* @ts-ignore */
-import * as libsignal from 'libsignal'
+// libsignal 的 index.d.ts 不完整（无 curve）；上游曾 @ts-ignore 仅压住 import 行，用法仍报错
+import * as libsignalImport from 'libsignal'
 import { KEY_BUNDLE_TYPE } from '../Defaults'
 import type { KeyPair } from '../Types'
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const libsignal = libsignalImport as any
 
 // insure browser & node compatibility
 const { subtle } = globalThis.crypto

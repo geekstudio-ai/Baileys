@@ -26,8 +26,10 @@ import {
 	getStatusCodeForMediaRetry,
 	getUrlFromDirectPath,
 	getWAUploadToServer,
+	loadTcToken,
 	normalizeMessageContent,
 	parseAndInjectE2ESessions,
+	storeTcTokensFromIqResult,
 	unixTimestampSeconds
 } from '../Utils'
 import { getUrlInfo } from '../Utils/link-preview'
@@ -314,6 +316,35 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		})
 
 		return msgId
+	}
+
+	/** Issue / refresh trusted_contact privacy tokens for the given JIDs (WA privacy IQ). */
+	const getPrivacyTokens = async (jids: string[]) => {
+		const t = unixTimestampSeconds().toString()
+		const result = await query({
+			tag: 'iq',
+			attrs: {
+				to: S_WHATSAPP_NET,
+				type: 'set',
+				xmlns: 'privacy'
+			},
+			content: [
+				{
+					tag: 'tokens',
+					attrs: {},
+					content: jids.map(jid => ({
+						tag: 'token',
+						attrs: {
+							jid: jidNormalizedUser(jid),
+							t,
+							type: 'trusted_contact'
+						}
+					}))
+				}
+			]
+		})
+
+		return result
 	}
 
 	const createParticipantNodes = async (jids: string[], message: proto.IMessage, extraAttrs?: BinaryNode['attrs']) => {
@@ -642,9 +673,47 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 				;(stanza.content as BinaryNode[]).push(...additionalNodes)
 			}
 
+			// SALESQUICKLY_TCTOKEN: 1:1 出站挂对端 privacy token（防 Reach-out 463）
+			// 注意：getPrivacyTokens/issuePrivacyTokens 是「把我方 token 发给对方」，
+			// IQ 响应通常不含可挂载的对端 token；对端 token 只能来自 history sync / privacy_token 通知。
+			const isPeerMessage = additionalAttributes?.['category'] === 'peer'
+			const is1on1Send = !isGroup && !isStatus && !isNewsletter && !isPeerMessage
+			if (is1on1Send) {
+				try {
+					const entry = await loadTcToken(authState.keys, destinationJid)
+					if (entry?.token?.length) {
+						;(stanza.content as BinaryNode[]).push({
+							tag: 'tctoken',
+							attrs: {},
+							content: Buffer.from(entry.token)
+						})
+						logger.info(
+							{ jid: destinationJid, tokenBytes: entry.token.length },
+							'attached tctoken to 1:1 stanza'
+						)
+					} else {
+						logger.warn(
+							{ jid: destinationJid },
+							'no peer tctoken in store (need history sync or inbound privacy_token); send may ack 463'
+						)
+					}
+				} catch (err: any) {
+					logger.warn({ jid: destinationJid, err: err?.message }, 'tctoken attach failed; sending without token')
+				}
+			}
+
 			logger.debug({ msgId }, `sending message to ${participants.length} devices`)
 
 			await sendNode(stanza)
+
+			// 发后 fire-and-forget：向对方签发我方 trusted_contact（不指望拿回可挂载 token）
+			if (is1on1Send) {
+				void getPrivacyTokens([destinationJid])
+					.then(result => storeTcTokensFromIqResult(authState.keys, result, destinationJid))
+					.catch(err =>
+						logger.warn({ jid: destinationJid, err: (err as Error)?.message }, 'post-send tctoken issue failed')
+					)
+			}
 		})
 
 		return msgId
@@ -690,34 +759,6 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		} else if (message.groupInviteMessage) {
 			return 'url'
 		}
-	}
-
-	const getPrivacyTokens = async (jids: string[]) => {
-		const t = unixTimestampSeconds().toString()
-		const result = await query({
-			tag: 'iq',
-			attrs: {
-				to: S_WHATSAPP_NET,
-				type: 'set',
-				xmlns: 'privacy'
-			},
-			content: [
-				{
-					tag: 'tokens',
-					attrs: {},
-					content: jids.map(jid => ({
-						tag: 'token',
-						attrs: {
-							jid: jidNormalizedUser(jid),
-							t,
-							type: 'trusted_contact'
-						}
-					}))
-				}
-			]
-		})
-
-		return result
 	}
 
 	const waUploadToServer = getWAUploadToServer(config, refreshMediaConn)
