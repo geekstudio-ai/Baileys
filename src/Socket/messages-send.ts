@@ -26,9 +26,13 @@ import {
 	getStatusCodeForMediaRetry,
 	getUrlFromDirectPath,
 	getWAUploadToServer,
+	getTcTokenJidAliases,
 	loadTcToken,
+	loadTcTokenRecord,
+	markTcTokenIssued,
 	normalizeMessageContent,
 	parseAndInjectE2ESessions,
+	shouldSendNewTcToken,
 	storeTcTokensFromIqResult,
 	unixTimestampSeconds
 } from '../Utils'
@@ -347,6 +351,9 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		return result
 	}
 
+	/** SALESQUICKLY_TCTOKEN: 正在签发中的对端 JID，避免连发多条时重复 IQ */
+	const inFlightTcTokenIssuance = new Set<string>()
+
 	const createParticipantNodes = async (jids: string[], message: proto.IMessage, extraAttrs?: BinaryNode['attrs']) => {
 		let patched = await patchMessageBeforeSending(message, jids)
 		if (!Array.isArray(patched)) {
@@ -403,6 +410,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 		}: MessageRelayOptions
 	) => {
 		const meId = authState.creds.me!.id
+		const meLid = authState.creds.me?.lid
 
 		let shouldIncludeDeviceIdentity = false
 
@@ -677,7 +685,8 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			// 注意：getPrivacyTokens/issuePrivacyTokens 是「把我方 token 发给对方」，
 			// IQ 响应通常不含可挂载的对端 token；对端 token 只能来自 history sync / privacy_token 通知。
 			const isPeerMessage = additionalAttributes?.['category'] === 'peer'
-			const is1on1Send = !isGroup && !isStatus && !isNewsletter && !isPeerMessage
+			const isSelfChat = areJidsSameUser(destinationJid, meId) || areJidsSameUser(destinationJid, meLid)
+			const is1on1Send = !isGroup && !isStatus && !isNewsletter && !isPeerMessage && !isSelfChat
 			if (is1on1Send) {
 				try {
 					const entry = await loadTcToken(authState.keys, destinationJid)
@@ -688,13 +697,18 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 							content: Buffer.from(entry.token)
 						})
 						logger.info(
-							{ jid: destinationJid, tokenBytes: entry.token.length },
+							{
+								jid: destinationJid,
+								storageJid: entry.storageJid,
+								tokenBytes: entry.token.length,
+								tokenTs: entry.timestamp
+							},
 							'attached tctoken to 1:1 stanza'
 						)
 					} else {
 						logger.warn(
-							{ jid: destinationJid },
-							'no peer tctoken in store (need history sync or inbound privacy_token); send may ack 463'
+							{ jid: destinationJid, aliases: getTcTokenJidAliases(destinationJid) },
+							'no valid peer tctoken in store (need history sync or inbound privacy_token); send may ack 463'
 						)
 					}
 				} catch (err: any) {
@@ -706,13 +720,27 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 
 			await sendNode(stanza)
 
-			// 发后 fire-and-forget：向对方签发我方 trusted_contact（不指望拿回可挂载 token）
-			if (is1on1Send) {
-				void getPrivacyTokens([destinationJid])
-					.then(result => storeTcTokensFromIqResult(authState.keys, result, destinationJid))
-					.catch(err =>
-						logger.warn({ jid: destinationJid, err: (err as Error)?.message }, 'post-send tctoken issue failed')
-					)
+			// 发后 fire-and-forget：向对方签发我方 trusted_contact（让对方能回复我们；不指望拿回可挂载 token）。
+			// 与 WA Web 一致：同一 7 天桶只签一次 + 并发去重；签发目标用 PN（上游 AB prop 14303 默认 false）。
+			if (is1on1Send && !normalizeMessageContent(message)?.protocolMessage) {
+				const issueJid = jidNormalizedUser(destinationJid)
+				if (!inFlightTcTokenIssuance.has(issueJid)) {
+					inFlightTcTokenIssuance.add(issueJid)
+					const issueTs = unixTimestampSeconds()
+					void loadTcTokenRecord(authState.keys, issueJid)
+						.then(async record => {
+							if (!shouldSendNewTcToken(record?.senderTimestamp)) return
+							const result = await getPrivacyTokens([issueJid])
+							const selfJids = [authState.creds.me?.id, authState.creds.me?.lid]
+							const stored = await storeTcTokensFromIqResult(authState.keys, result, issueJid, selfJids)
+							await markTcTokenIssued(authState.keys, issueJid, issueTs)
+							logger.info({ jid: issueJid, stored }, 'issued our trusted_contact tctoken to peer')
+						})
+						.catch(err =>
+							logger.warn({ jid: issueJid, err: (err as Error)?.message }, 'post-send tctoken issue failed')
+						)
+						.finally(() => inFlightTcTokenIssuance.delete(issueJid))
+				}
 			}
 		})
 

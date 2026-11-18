@@ -243,7 +243,7 @@ const processMessage = async (
 
 					// SALESQUICKLY_TCTOKEN: history 会话里的 tcToken 是对端 token 主来源
 					try {
-						const stored = await storeTcTokensFromHistorySync(keyStore, data.chats)
+						const stored = await storeTcTokensFromHistorySync(keyStore, data.chats, [creds.me?.id, creds.me?.lid])
 						if (stored > 0) {
 							logger?.info({ stored, chats: data.chats.length }, 'persisted tctoken(s) from history sync')
 						}

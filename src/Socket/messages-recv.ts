@@ -36,7 +36,7 @@ import {
 	NACK_REASONS,
 	NO_MESSAGE_FOUND_ERROR_TEXT,
 	linkTcTokenJids,
-	mirrorTcTokenBetweenJids,
+	loadTcTokenRecord,
 	storeTcTokenNodes,
 	unixTimestampSeconds,
 	xmppPreKey,
@@ -402,27 +402,37 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 					if (c.tag === 'token') tokenList.push(c)
 					else tokenList.push(...getBinaryNodeChildren(c, 'token'))
 				}
-				// SALESQUICKLY_TCTOKEN: from/sender_lid 才是对端；attrs.jid 常为本端
-				const senderLid = node.attrs.sender_lid
-					? jidNormalizedUser(node.attrs.sender_lid)
-					: undefined
-				const peerJid = from || senderLid
+				// SALESQUICKLY_TCTOKEN: 对端 = sender_lid ?? from（上游同款）；token.attrs.jid 是本端，绝不能当 key。
+				// 6.7 无 LID mapping，出站按 PN 发，所以通知里能拿到的 PN（from / sender_pn）也各存一份。
+				const senderLid =
+					node.attrs.sender_lid && isLidUser(jidNormalizedUser(node.attrs.sender_lid))
+						? jidNormalizedUser(node.attrs.sender_lid)
+						: undefined
+				const senderPn = node.attrs.sender_pn ? jidNormalizedUser(node.attrs.sender_pn) : undefined
+				const peerJid = senderLid ?? from
+				const peerJids = [...new Set([senderLid, from, senderPn].filter((j): j is string => !!j))]
+				const selfJids = [authState.creds.me?.id, authState.creds.me?.lid]
+				// 原始属性打 info，便于确认对端是否真的签发了 token、存到了哪个 key
+				logger.info(
+					{
+						attrs: node.attrs,
+						childTags: notifChildren.map(c => c.tag),
+						tokens: tokenList.map(t => ({
+							jid: t.attrs.jid,
+							t: t.attrs.t,
+							type: t.attrs.type,
+							bytes: t.content instanceof Uint8Array ? t.content.length : 0
+						}))
+					},
+					'received privacy_token notification'
+				)
 				try {
-					const stored = await storeTcTokenNodes(authState.keys, tokenList, peerJid)
-					if (senderLid && from && senderLid !== from) {
-						linkTcTokenJids(from, senderLid)
-						await mirrorTcTokenBetweenJids(authState.keys, from, senderLid)
+					const stored = await storeTcTokenNodes(authState.keys, tokenList, peerJids, selfJids)
+					for (let i = 1; i < peerJids.length; i++) {
+						linkTcTokenJids(peerJids[0]!, peerJids[i]!)
 					}
-					logger.info(
-						{
-							from,
-							senderLid,
-							tokenCount: tokenList.length,
-							stored,
-							childTags: notifChildren.map(c => c.tag)
-						},
-						'persisted privacy_token tctoken(s)'
-					)
+
+					logger.info({ peerJids, stored }, 'persisted privacy_token tctoken(s)')
 				} catch (err) {
 					logger.warn({ err, from }, 'failed to persist privacy_token')
 				}
@@ -1050,6 +1060,21 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		// device could not display the message
 		if (attrs.error) {
 			logger.warn({ attrs }, 'received error in ack')
+			// SALESQUICKLY_TCTOKEN: 463 = 本号处于 reach-out 限制，且这条 1:1 没带有效的对端 tctoken。
+			// 对端 token 只能由对方客户端签发（对方给我们发消息时 issue trusted_contact）；我方重试只会加重限制。
+			if (attrs.error === '463' && attrs.from) {
+				const record = await loadTcTokenRecord(authState.keys, attrs.from).catch(() => undefined)
+				logger.warn(
+					{
+						msgId: attrs.id,
+						to: attrs.from,
+						peerTokenStored: !!record?.token?.length,
+						peerTokenTs: record?.timestamp,
+						ourIssuedTs: record?.senderTimestamp
+					},
+					'error 463: account reach-out restricted and no valid peer tctoken; the peer client must issue a trusted_contact token to us (e.g. peer sends a message from an official client)'
+				)
+			}
 			ev.emit('messages.update', [
 				{
 					key,
