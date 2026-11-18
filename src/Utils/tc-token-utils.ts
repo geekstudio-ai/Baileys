@@ -86,15 +86,55 @@ export async function storeTcTokensFromIqResult(
 	return storeTcTokenNodes(keys, getBinaryNodeChildren(tokensNode, 'token'), fallbackJid)
 }
 
+/** 进程内 PN↔LID 别名：出站按 PN 读时也能命中按 LID 落库的 token（6.7 无官方 LID mapping） */
+const tcTokenJidAliases = new Map<string, Set<string>>()
+
+export function linkTcTokenJids(jidA: string, jidB: string): void {
+	const a = storageJidForTcToken(jidA)
+	const b = storageJidForTcToken(jidB)
+	if (!a || !b || a === b) return
+	if (!tcTokenJidAliases.has(a)) tcTokenJidAliases.set(a, new Set())
+	if (!tcTokenJidAliases.has(b)) tcTokenJidAliases.set(b, new Set())
+	tcTokenJidAliases.get(a)!.add(b)
+	tcTokenJidAliases.get(b)!.add(a)
+}
+
 export async function loadTcToken(
 	keys: SignalKeyStoreWithTransaction,
 	jid: string
 ): Promise<TcTokenEntry | undefined> {
-	const storageJid = storageJidForTcToken(jid)
-	const data = await keys.get('tctoken', [storageJid])
-	const entry = data[storageJid]
-	if (!entry?.token?.length) return undefined
-	return entry
+	const primary = storageJidForTcToken(jid)
+	const candidates = new Set<string>([primary])
+	for (const alt of tcTokenJidAliases.get(primary) ?? []) candidates.add(alt)
+
+	const data = await keys.get('tctoken', [...candidates])
+	for (const storageJid of candidates) {
+		const entry = data[storageJid]
+		if (entry?.token?.length) return entry
+	}
+	return undefined
+}
+
+/** 把已有 tctoken 在两个 JID 间双写（学到 LID↔PN 后立刻镜像，避免出站 miss） */
+export async function mirrorTcTokenBetweenJids(
+	keys: SignalKeyStoreWithTransaction,
+	jidA: string,
+	jidB: string
+): Promise<boolean> {
+	linkTcTokenJids(jidA, jidB)
+	const a = storageJidForTcToken(jidA)
+	const b = storageJidForTcToken(jidB)
+	if (!isStoreableUserJid(a) || !isStoreableUserJid(b) || a === b) return false
+
+	const data = await keys.get('tctoken', [a, b])
+	const entryA = data[a]
+	const entryB = data[b]
+	const writes: Record<string, TcTokenEntry> = {}
+	if (entryA?.token?.length && !entryB?.token?.length) writes[b] = entryA
+	if (entryB?.token?.length && !entryA?.token?.length) writes[a] = entryB
+	if (!Object.keys(writes).length) return false
+	await keys.set({ tctoken: writes })
+	return true
 }
 
 type HistoryChatTc = {

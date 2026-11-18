@@ -35,6 +35,8 @@ import {
 	MISSING_KEYS_ERROR_TEXT,
 	NACK_REASONS,
 	NO_MESSAGE_FOUND_ERROR_TEXT,
+	linkTcTokenJids,
+	mirrorTcTokenBetweenJids,
 	storeTcTokenNodes,
 	unixTimestampSeconds,
 	xmppPreKey,
@@ -392,12 +394,35 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 		const from = jidNormalizedUser(node.attrs.from)
 
 		switch (nodeType) {
-			case 'privacy_token':
-				const tokenList = getBinaryNodeChildren(child, 'token')
-				// SALESQUICKLY_TCTOKEN: from=对端；attrs.jid 常为本端。必须用 from 作 fallback 落库
+			case 'privacy_token': {
+				// 节点形态可能是 notification>tokens>token 或 notification>token
+				const notifChildren = getAllBinaryNodeChildren(node)
+				const tokenList: BinaryNode[] = []
+				for (const c of notifChildren) {
+					if (c.tag === 'token') tokenList.push(c)
+					else tokenList.push(...getBinaryNodeChildren(c, 'token'))
+				}
+				// SALESQUICKLY_TCTOKEN: from/sender_lid 才是对端；attrs.jid 常为本端
+				const senderLid = node.attrs.sender_lid
+					? jidNormalizedUser(node.attrs.sender_lid)
+					: undefined
+				const peerJid = from || senderLid
 				try {
-					const stored = await storeTcTokenNodes(authState.keys, tokenList, from)
-					logger.info({ from, stored }, 'persisted privacy_token tctoken(s)')
+					const stored = await storeTcTokenNodes(authState.keys, tokenList, peerJid)
+					if (senderLid && from && senderLid !== from) {
+						linkTcTokenJids(from, senderLid)
+						await mirrorTcTokenBetweenJids(authState.keys, from, senderLid)
+					}
+					logger.info(
+						{
+							from,
+							senderLid,
+							tokenCount: tokenList.length,
+							stored,
+							childTags: notifChildren.map(c => c.tag)
+						},
+						'persisted privacy_token tctoken(s)'
+					)
 				} catch (err) {
 					logger.warn({ err, from }, 'failed to persist privacy_token')
 				}
@@ -405,13 +430,14 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 					const jid = attrs.jid
 					ev.emit('chats.update', [
 						{
-							id: jid || from,
+							id: peerJid || jid,
 							tcToken: content as Buffer
 						}
 					])
 				}
 
 				break
+			}
 			case 'newsletter':
 				await handleNewsletterNotification(node)
 				break
